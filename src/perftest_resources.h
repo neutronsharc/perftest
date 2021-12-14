@@ -155,6 +155,12 @@ struct cma {
 	int disconnects_left;
 };
 
+// Information to measure latency.
+struct LatencyStat {
+  uint64_t sent_cnt;  // how many sent has been issued.
+  uint64_t recv_cnt;  // every sent pkt will have an echo pkt returned.
+};
+
 struct pingpong_context {
 	struct cma cma_master;
 	struct rdma_event_channel		*cm_channel;
@@ -196,8 +202,21 @@ struct pingpong_context {
 	uint64_t				flow_buff_size;
 	int					tx_depth;
 	int					huge_shmid;
-	uint64_t				*scnt;
-	uint64_t				*ccnt;
+	// stats to measure bandwidth.
+	uint64_t				*scnt;  // send-posted
+	uint64_t				*ccnt;  // send-completed
+
+  int num_of_qps;  // number of qpairs.
+	uint64_t last_report_ts;  // timestamp (usec) of last report. Current cnts begin from here.
+  uint64_t report_cnt;  // how many times we have reported qp stats.
+	// number of sent/recv ops performed in current cycle
+	uint64_t *sent_cnt_current_cycle;
+  uint64_t *sent_bytes_current_cycle;
+	uint64_t *recv_cnt_current_cycle;
+  uint64_t *recv_bytes_current_cycle;
+
+  struct LatencyStat lat_stat;
+
 	int					is_contig_supported;
 	uint32_t				*r_dctn;
 	uint32_t				*dci_stream_id;
@@ -928,5 +947,9 @@ int rdma_cm_destroy_cma(struct pingpong_context *ctx,
 *
 */
 int error_handler(char *error_message);
+
+void ClearStatsCnt(struct pingpong_context* ctx);
+void ReportCurrentBwStatsAndReset(struct pingpong_context *ctx, struct perftest_parameters *user_param);
+void ReportCurrentLatStatsAndReset(struct pingpong_context* ctx, struct perftest_parameters *user_param);
 
 #endif /* PERFTEST_RESOURCES_H */

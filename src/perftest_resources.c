@@ -28,6 +28,7 @@
 
 #include "perftest_resources.h"
 #include "raw_ethernet_resources.h"
+#include "log.h"
 
 static enum ibv_wr_opcode opcode_verbs_array[] = {IBV_WR_SEND,IBV_WR_RDMA_WRITE,IBV_WR_RDMA_READ};
 static enum ibv_wr_opcode opcode_atomic_array[] = {IBV_WR_ATOMIC_CMP_AND_SWP,IBV_WR_ATOMIC_FETCH_AND_ADD};
@@ -1132,8 +1133,17 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 	tarr_size = (user_param->noPeak) ? 1 : user_param->iters*user_param->num_of_qps;
 	ALLOCATE(user_param->tposted, cycles_t, tarr_size);
 	memset(user_param->tposted, 0, sizeof(cycles_t)*tarr_size);
-	if ((user_param->tst == LAT || user_param->tst == FS_RATE) && user_param->test_type == DURATION)
-		ALLOCATE(user_param->tcompleted, cycles_t, 1);
+
+	LOG("user_params: nopeak=%d, cycle_buf=%d, num_qps=%d",
+      user_param->noPeak, user_param->cycle_buffer, user_param->num_of_qps);
+  LOG("post_list=%d, recv_post_list=%d, ctx tarr_size=%ld, user_param->tposted[]=%ld",  // time array size.
+      user_param->post_list, user_param->recv_post_list, tarr_size, tarr_size);
+
+  if ((user_param->tst == LAT || user_param->tst == FS_RATE) && user_param->test_type == DURATION) {
+    LOG("user_param->tcompleted=1");
+    ALLOCATE(user_param->tcompleted, cycles_t, 1);
+  }
+	ctx->num_of_qps = user_param->num_of_qps;
 
 	ALLOCATE(ctx->qp, struct ibv_qp*, user_param->num_of_qps);
 	#ifdef HAVE_IBV_WR_API
@@ -1154,15 +1164,27 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 	ALLOCATE(ctx->buf, void* , user_param->num_of_qps);
 
 	if ((user_param->tst == BW || user_param->tst == LAT_BY_BW) && (user_param->machine == CLIENT || user_param->duplex)) {
-
-		ALLOCATE(user_param->tcompleted,cycles_t,tarr_size);
+    LOG("user_param->tcompleted[]=%ld", tarr_size);
+    ALLOCATE(user_param->tcompleted,cycles_t,tarr_size);
 		memset(user_param->tcompleted, 0, sizeof(cycles_t)*tarr_size);
 		ALLOCATE(ctx->my_addr,uint64_t,user_param->num_of_qps);
 		ALLOCATE(ctx->rem_addr,uint64_t,user_param->num_of_qps);
-		ALLOCATE(ctx->scnt,uint64_t,user_param->num_of_qps);
-		ALLOCATE(ctx->ccnt,uint64_t,user_param->num_of_qps);
+		ALLOCATE(ctx->scnt,uint64_t,user_param->num_of_qps);   // sent issued count
+		ALLOCATE(ctx->ccnt,uint64_t,user_param->num_of_qps);   // sent-completed count
 		memset(ctx->scnt, 0, user_param->num_of_qps * sizeof (uint64_t));
 		memset(ctx->ccnt, 0, user_param->num_of_qps * sizeof (uint64_t));
+
+		// summarize cnts in current report cycle.
+		size_t datasize = user_param->num_of_qps * sizeof(uint64_t);
+		ALLOCATE(ctx->sent_cnt_current_cycle, uint64_t, user_param->num_of_qps);
+		ALLOCATE(ctx->sent_bytes_current_cycle, uint64_t, user_param->num_of_qps);
+		ALLOCATE(ctx->recv_cnt_current_cycle, uint64_t, user_param->num_of_qps);
+		ALLOCATE(ctx->recv_bytes_current_cycle, uint64_t, user_param->num_of_qps);
+		memset(ctx->sent_cnt_current_cycle, 0, datasize);
+		memset(ctx->sent_bytes_current_cycle, 0, datasize);
+		memset(ctx->recv_cnt_current_cycle, 0, datasize);
+		memset(ctx->recv_bytes_current_cycle, 0, datasize);
+		ctx->report_cnt = 0;
 
 	} else if ((user_param->tst == BW || user_param->tst == LAT_BY_BW)
 		   && user_param->verb == SEND && user_param->machine == SERVER) {
@@ -1212,6 +1234,9 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 	user_param->buff_size = ctx->buff_size;
 	if (user_param->connection_type == UD)
 		ctx->buff_size += ctx->cache_line_size;
+
+	LOG("ctx params: cycle_buf=%d, buf_size=%ld, send_qp_buf_size=%ld, ctx->flow_buf_size=%ld, cache_line=%d",
+	    ctx->cycle_buffer, ctx->buff_size, ctx->send_qp_buff_size, ctx->flow_buff_size, ctx->cache_line_size);
 }
 
 /******************************************************************************
@@ -1625,7 +1650,7 @@ int create_single_mr(struct pingpong_context *ctx, struct perftest_parameters *u
 			fprintf(stderr, "Couldn't allocate work buf.\n");
 			return FAILURE;
 		}
-
+		LOG("use mmap_file to allocate ctx->buf=%ld", ctx->buff_size);
 	} else {
 		/* Allocating buffer for data, in case driver not support contig pages. */
 		if (ctx->is_contig_supported == FAILURE) {
@@ -1641,7 +1666,8 @@ int create_single_mr(struct pingpong_context *ctx, struct perftest_parameters *u
 			} else if  (ctx->is_contig_supported == FAILURE) {
 				ctx->buf[qp_index] = memalign(user_param->cycle_buffer, ctx->buff_size);
 			}
-			#endif
+			LOG("regular allocate ctx->buf[%d]=%ld for qp_index=%d", qp_index, ctx->buff_size, qp_index);
+#endif
 			if (!ctx->buf[qp_index]) {
 				fprintf(stderr, "Couldn't allocate work buf.\n");
 				return FAILURE;
@@ -1670,6 +1696,7 @@ int create_single_mr(struct pingpong_context *ctx, struct perftest_parameters *u
 	}
 #endif
 
+  LOG("reg_mr buf[%d]=0x%lx size=%ld", qp_index, (uint64_t)ctx->buf[qp_index], ctx->buff_size);
 	/* Allocating Memory region and assigning our buffer to it. */
 	ctx->mr[qp_index] = ibv_reg_mr(ctx->pd, ctx->buf[qp_index], ctx->buff_size, flags);
 
@@ -1707,6 +1734,8 @@ int create_mr(struct pingpong_context *ctx, struct perftest_parameters *user_par
 {
 	int i;
 
+	LOG("have %d qps, mr_per_qp=%d, ctx->size=%ld, ctx->cycle_buf=%d",
+			user_param->num_of_qps, user_param->mr_per_qp, ctx->size, ctx->cycle_buffer);
 	/* create first MR */
 	if (create_single_mr(ctx, user_param, 0)) {
 		fprintf(stderr, "failed to create mr\n");
@@ -1721,10 +1750,13 @@ int create_mr(struct pingpong_context *ctx, struct perftest_parameters *user_par
 				return 1;
 			}
 		} else {
+
 			ALLOCATE(ctx->mr[i], struct ibv_mr, 1);
 			memset(ctx->mr[i], 0, sizeof(struct ibv_mr));
 			ctx->mr[i] = ctx->mr[0];
 			ctx->buf[i] = ctx->buf[0] + (i*BUFF_SIZE(ctx->size, ctx->cycle_buffer));
+			LOG("qp[%d] uses buf[0] memory at offset=%ld size=%ld",
+					i, (uint64_t)(ctx->buf[i] - ctx->buf[0]), BUFF_SIZE(ctx->size, ctx->cycle_buffer));
 		}
 	}
 
@@ -1753,6 +1785,7 @@ int alloc_hugepage_region (struct pingpong_context *ctx, int qp_index)
 		return FAILURE;
 	}
 
+	LOG("allocate hugepage size=%ld in buf[%d] for qp_index=%d", buf_size, qp_index, qp_index);
 	/* attach shared memory */
 	ctx->buf[qp_index] = (void *) shmat(ctx->huge_shmid, SHMAT_ADDR, SHMAT_FLAGS);
 	if (ctx->buf == (void *) -1) {
@@ -1869,6 +1902,7 @@ int ctx_init(struct pingpong_context *ctx, struct perftest_parameters *user_para
 	#endif
 	ctx->is_contig_supported = FAILURE;
 
+	LOG("use_event=%d", user_param->use_event);
 	/* Allocating an event channel if requested. */
 	if (user_param->use_event) {
 		ctx->channel = ibv_create_comp_channel(ctx->context);
@@ -1967,6 +2001,7 @@ int ctx_init(struct pingpong_context *ctx, struct perftest_parameters *user_para
 		return FAILURE;
 	}
 
+	// create one send-cq and one recv-cq.
 	if (create_cqs(ctx, user_param)) {
 		fprintf(stderr, "Failed to create CQs\n");
 		return FAILURE;
@@ -2135,6 +2170,7 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 	memset(&attr, 0, sizeof(struct ibv_qp_init_attr));
 	#endif
 
+	// All qpairs in a ctx share the same "send_cq" and "recv-cq".
 	attr.send_cq = ctx->send_cq;
 	attr.recv_cq = (user_param->verb == SEND) ? ctx->recv_cq : ctx->send_cq;
 
@@ -2307,6 +2343,7 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 		fprintf(stderr, "Current TX depth is %d and inline size is %d .\n", user_param->tx_depth, user_param->inline_size);
 	}
 
+	LOG("qp[%d] max inline data=%d", qp_index, attr.cap.max_inline_data);
 	if (user_param->inline_size > attr.cap.max_inline_data) {
 		user_param->inline_size = attr.cap.max_inline_data;
 		printf("  Actual inline-size(%d) > requested inline-size(%d)\n",
@@ -2867,11 +2904,16 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 
 			ctx->scnt[i] = 0;
 			ctx->ccnt[i] = 0;
+			ctx->sent_cnt_current_cycle[i] = 0;
+			ctx->sent_bytes_current_cycle[i] = 0;
+			ctx->recv_cnt_current_cycle[i] = 0;
+			ctx->recv_bytes_current_cycle[i] = 0;
 			ctx->my_addr[i] = (uintptr_t)ctx->buf[i];
 			if (user_param->verb != SEND)
 				ctx->rem_addr[i] = rem_dest[xrc_offset + i].vaddr;
 		}
 
+		// all "post_list" wqe's use the same ctx->buf[i], send buf size=user_param->size.
 		for (j = 0; j < user_param->post_list; j++) {
 
 			ctx->sge_list[i*user_param->post_list + j].length =
@@ -2998,6 +3040,8 @@ int ctx_set_recv_wqes(struct pingpong_context *ctx,struct perftest_parameters *u
 		i = 1;
 		num_of_qps = 1;
 	}
+	// ctx->buf[0] is a big chunk of buf, the beginning are regions for each qp's send_buf,
+  // the later are regions for each qp's recv_buf.
 	for (k = 0; i < user_param->num_of_qps; i++,k++) {
 		if (!user_param->mr_per_qp) {
 			ctx->recv_sge_list[i * user_param->recv_post_list].addr = (uintptr_t)ctx->buf[0] +
@@ -3248,6 +3292,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	uintptr_t		primary_send_addr = ctx->sge_list[0].addr;
 	int			address_offset = 0;
 	int			flows_burst_iter = 0;
+	int qpidx = 0;
 
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
@@ -3310,6 +3355,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 		gap_cycles = cpu_mhz * gap_time;
 	}
 
+	ctx->last_report_ts = NowInUsec();  // beginning of actual work.
 	/* main loop for posting */
 	while (totscnt < tot_iters  || totccnt < tot_iters ||
 		(user_param->test_type == DURATION && user_param->state != END_STATE) ) {
@@ -3405,10 +3451,12 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 						goto cleaning;
 					}
 				}
+				// poll for send completion events.
 				ne = ibv_poll_cq(ctx->send_cq, CTX_POLL_BATCH, wc);
 				if (ne > 0) {
 					for (i = 0; i < ne; i++) {
 						wc_id = (int)wc[i].wr_id;
+						qpidx = (int)wc[i].wr_id;
 
 						if (wc[i].status != IBV_WC_SUCCESS) {
 							NOTIFY_COMP_ERROR_SEND(wc[i],totscnt,totccnt);
@@ -3418,6 +3466,8 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 
 						ctx->ccnt[wc_id] += user_param->cq_mod;
 						totccnt += user_param->cq_mod;
+						ctx->sent_cnt_current_cycle[qpidx] += user_param->cq_mod;
+						ctx->sent_bytes_current_cycle[qpidx] += user_param->cq_mod * user_param->size;
 						if (user_param->noPeak == OFF) {
 							if (totccnt > tot_iters)
 								user_param->tcompleted[user_param->iters*num_of_qps - 1] = get_cycles();
@@ -3438,6 +3488,12 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 					return_value = FAILURE;
 					goto cleaning;
 					}
+		}
+		// check if we need to report.
+		if (totccnt % 1000 == 0) {
+			if (NowInUsec() - ctx->last_report_ts >= 1000000) {
+				ReportCurrentBwStatsAndReset(ctx, user_param);
+			}
 		}
 	}
 	if (user_param->noPeak == ON && user_param->test_type == ITERATIONS)
@@ -3959,6 +4015,10 @@ int run_iter_bi(struct pingpong_context *ctx,
 	int 			before_first_rx = ON;
 	int 			return_value = 0;
 
+	uint64_t recv_bytes = 0, sent_bytes = 0;  // total bytes of received/sent data.
+  uint64_t ts_begin, total_time_us;
+  int qpidx = 0;
+
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
 		ctx_post_send_work_request_func_pointer(ctx, user_param);
@@ -4018,6 +4078,12 @@ int run_iter_bi(struct pingpong_context *ctx,
 	iters=user_param->iters;
 	check_alive_data.g_total_iters = tot_iters;
 
+	LOG("send_size=%ld, tot_iters=%ld, scnt=%ld, rcnt=%ld, ccnt=%ld, ctx->send_rcredit=%d",
+			user_param->size, tot_iters, totscnt, totrcnt, totccnt, ctx->send_rcredit);
+	ts_begin = NowInUsec();
+	ctx->last_report_ts = NowInUsec();
+	ctx->report_cnt = 0;
+
 	while ((user_param->test_type == DURATION && user_param->state != END_STATE) ||
 							totccnt < tot_iters || totrcnt < tot_iters ) {
 
@@ -4052,6 +4118,7 @@ int run_iter_bi(struct pingpong_context *ctx,
 						ctx->my_addr[index],0,ctx->cache_line_size,ctx->cycle_buffer);
 				}
 
+				// Have posted "post_list" number of outgoing pkts.
 				ctx->scnt[index] += user_param->post_list;
 				totscnt += user_param->post_list;
 
@@ -4072,9 +4139,10 @@ int run_iter_bi(struct pingpong_context *ctx,
 			}
 		}
 
+		// poll for receive completion.
 		ne = ibv_poll_cq(ctx->recv_cq,user_param->rx_depth,wc);
 		if (ne > 0) {
-
+			// Have received "ne" incoming data pkts. Each size=ctc->size. Sum up recv_data.
 			if (user_param->machine == SERVER && before_first_rx == ON) {
 				before_first_rx = OFF;
 				if (user_param->test_type == DURATION) {
@@ -4095,11 +4163,15 @@ int run_iter_bi(struct pingpong_context *ctx,
 					return_value = FAILURE;
 					goto cleaning;
 				}
-
+				qpidx = wc[i].wr_id;  // the recv event is on qp[qpidx].
 				rcnt_for_qp[wc[i].wr_id]++;
 				unused_recv_for_qp[wc[i].wr_id]++;
 				totrcnt++;
 				check_alive_data.current_totrcnt = totrcnt;
+				// qp[qpidx] has a recv event.
+				recv_bytes += user_param->size;
+				ctx->recv_cnt_current_cycle[qpidx]++;
+				ctx->recv_bytes_current_cycle[qpidx] += wc[i].byte_len;
 
 				if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE) {
 					if (user_param->report_per_port) {
@@ -4203,16 +4275,18 @@ int run_iter_bi(struct pingpong_context *ctx,
 			}
 		}
 
+		// Poll for send completion.
 		ne = ibv_poll_cq(ctx->send_cq,CTX_POLL_BATCH,wc_tx);
 
 		if (ne > 0) {
+			// Each event of the "ne" is "cq_mod" transmit/outgoing data pkt, each pkt size= user_param->size.
 			for (i = 0; i < ne; i++) {
 				if (wc_tx[i].status != IBV_WC_SUCCESS) {
 					NOTIFY_COMP_ERROR_SEND(wc_tx[i],totscnt,totccnt);
 					return_value = FAILURE;
 					goto cleaning;
 				}
-
+				qpidx = wc_tx[i].wr_id;
 				if (wc_tx[i].opcode == IBV_WC_RDMA_WRITE) {
 					if (!ctx->send_rcredit) {
 						fprintf(stderr, "Polled RDMA_WRITE completion without recv credit request\n");
@@ -4224,6 +4298,9 @@ int run_iter_bi(struct pingpong_context *ctx,
 				} else  {
 					totccnt += user_param->cq_mod;
 					ctx->ccnt[(int)wc_tx[i].wr_id] += user_param->cq_mod;
+					sent_bytes += (user_param->cq_mod * user_param->size);
+					ctx->sent_cnt_current_cycle[qpidx] += user_param->cq_mod;
+					ctx->sent_bytes_current_cycle[qpidx] += user_param->cq_mod * user_param->size;
 
 					if (user_param->noPeak == OFF) {
 
@@ -4247,7 +4324,20 @@ int run_iter_bi(struct pingpong_context *ctx,
 			return_value = FAILURE;
 			goto cleaning;
 		}
+
+		if (totccnt % 1000 == 0) {
+		  if (NowInUsec() - ctx->last_report_ts >= 1000000) {
+				ReportCurrentBwStatsAndReset(ctx, user_param);
+		  }
+		}
 	}
+
+	total_time_us = NowInUsec() - ts_begin;
+	double tsec = total_time_us / 1000.0 / 1000;
+	LOG("totscnt=%ld, totrcnt=%ld, totccnt(send complete)=%ld", totscnt, totrcnt, totccnt);
+	LOG("time=%ld ms, sent_bytes=%ld, send_bw=%.2f MB/s, recv_bytes=%ld, recv_bw=%.2f MB/s\n",
+	    total_time_us / 1000, sent_bytes, sent_bytes / 1024.0 / 1024 / tsec,
+	    recv_bytes, recv_bytes / 1024.0 / 1024 / tsec);
 
 	if (user_param->noPeak == ON && user_param->test_type == ITERATIONS) {
 		user_param->tcompleted[0] = get_cycles();
@@ -4491,6 +4581,10 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 		ctx_post_send_work_request_func_pointer(ctx, user_param);
 	#endif
 
+	ctx->last_report_ts = NowInUsec();
+	ctx->lat_stat.sent_cnt = 0;
+	ctx->lat_stat.recv_cnt = 0;
+
 	if (user_param->connection_type != RawEth) {
 		ctx->wr[0].sg_list->length = user_param->size;
 		ctx->wr[0].send_flags = 0;
@@ -4530,6 +4624,9 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 					}
 
 					rcnt++;
+					if (user_param->machine == CLIENT) {
+						ctx->lat_stat.recv_cnt++;
+					}
 
 					if (user_param->test_type == DURATION && user_param->state == SAMPLE_STATE)
 						user_param->iters++;
@@ -4581,6 +4678,9 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 				user_param->tposted[scnt] = get_cycles();
 
 			scnt++;
+			if (user_param->machine == CLIENT) {
+				ctx->lat_stat.sent_cnt++;
+			}
 
 			if (scnt % user_param->cq_mod == 0 || (user_param->test_type == ITERATIONS && scnt == user_param->iters)) {
 				poll = 1;
@@ -4607,7 +4707,7 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 				}
 			}
 			if (poll == 1) {
-
+				// poll for send_completion event.
 				struct ibv_wc s_wc;
 				int s_ne;
 
@@ -4634,6 +4734,12 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 				}
 				poll = 0;
 				ctx->wr[0].send_flags &= ~IBV_SEND_SIGNALED;
+			}
+		}
+    // print lat stats at client side.
+		if (user_param->machine == CLIENT && rcnt > 0 && (rcnt % 1000 == 0)) {
+			if (NowInUsec() >= ctx->last_report_ts + 1000000) {
+				ReportCurrentLatStatsAndReset(ctx, user_param);
 			}
 		}
 	}
@@ -5173,6 +5279,62 @@ int error_handler(char *error_message)
 {
 	fprintf(stderr, "%s\nERRNO: %s.\n", error_message, strerror(errno));
 	return FAILURE;
+}
+
+void ClearCurrentStatsCnt(struct pingpong_context* ctx) {
+	size_t datasize = sizeof(uint64_t) * ctx->num_of_qps;
+	memset(ctx->sent_bytes_current_cycle, 0, datasize);
+	memset(ctx->sent_cnt_current_cycle, 0, datasize);
+	memset(ctx->recv_bytes_current_cycle, 0, datasize);
+	memset(ctx->recv_cnt_current_cycle, 0, datasize);
+}
+
+void ReportCurrentBwStatsAndReset(struct pingpong_context *ctx, struct perftest_parameters *user_param) {
+  uint64_t ts = NowInUsec();
+  double sec = (ts - ctx->last_report_ts) / 1000000.0;
+  ctx->last_report_ts = ts;
+
+  if (ctx->report_cnt % 25 == 0) {
+  	LOG("send_size  send bw(MB/s)  send ops/sec  recv bw(MB/s)  recv ops/sec");
+  }
+	ctx->report_cnt++;
+
+  size_t sent_bytes = 0, recv_bytes = 0;
+  size_t sent_ops = 0, recv_ops = 0;
+  for (int i = 0; i < ctx->num_of_qps; i++) {
+    sent_bytes += ctx->sent_bytes_current_cycle[i];
+    sent_ops += ctx->sent_cnt_current_cycle[i];
+    recv_bytes += ctx->recv_bytes_current_cycle[i];
+    recv_ops += ctx->recv_cnt_current_cycle[i];
+  }
+
+  LOG(" %-8ld   %-12.2f  %-12d  %-12.2f  %-12d",
+      user_param->size,
+      sent_bytes / 1024.0 / 1024 / sec, (int)(sent_ops / sec),
+      recv_bytes / 1024.0 / 1024 / sec, (int)(recv_ops / sec));
+
+  ClearCurrentStatsCnt(ctx);
+}
+
+void ReportCurrentLatStatsAndReset(struct pingpong_context *ctx, struct perftest_parameters *user_param) {
+	uint64_t ts = NowInUsec();
+	uint64_t time_us = ts - ctx->last_report_ts;
+	uint64_t num_roundtrips = ctx->lat_stat.recv_cnt;
+
+	ctx->last_report_ts = ts;  // beginning of next report cycle.
+
+  ctx->lat_stat.recv_cnt = 0;
+  ctx->lat_stat.sent_cnt = 0;
+
+	if (ctx->report_cnt % 25 == 0) {
+		LOG("send_size  avg_lat(usec)   avg_tps");
+	}
+	ctx->report_cnt++;
+
+	double lat = time_us / 2.0 / num_roundtrips;
+	uint64_t tps = (uint64_t)(num_roundtrips * 1000000.0 / time_us);
+
+	LOG("  %-8ld   %-12.2f   %-12ld", user_param->size, lat, tps);
 }
 
 /******************************************************************************

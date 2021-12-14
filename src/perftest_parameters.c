@@ -11,6 +11,7 @@
 #endif
 #include "perftest_parameters.h"
 #include "raw_ethernet_resources.h"
+#include "log.h"
 #include<math.h>
 #ifdef HAVE_RO
 #include <stdbool.h>
@@ -814,6 +815,9 @@ static void init_perftest_params(struct perftest_parameters *user_param)
 	user_param->disable_pcir		= 0;
 	user_param->source_ip		= NULL;
 	user_param->has_source_ip	= 0;
+
+	LOG("set default: cycle_buf=%d, cache_line=%d, tx size=%ld",
+			user_param->cycle_buffer, user_param->cache_line_size, user_param->size);
 }
 
 static int open_file_write(const char* file_path)
@@ -1699,6 +1703,7 @@ static void force_dependecies(struct perftest_parameters *user_param)
 	if (user_param->verb == SEND && (user_param->rx_depth % 2 == 1) && user_param->test_method == RUN_REGULAR)
 		user_param->rx_depth += 1;
 
+	// If too many iters, then unable to allocate mem to hold the stats, so turn off peak-summary.
 	if (user_param->test_type == ITERATIONS && user_param->iters > 20000 && user_param->noPeak == OFF && user_param->tst == BW)
 		user_param->noPeak = ON;
 
@@ -2329,7 +2334,9 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			case 'm': user_param->mtu  = strtol(optarg, NULL, 0); break;
 			case 'n': CHECK_VALUE(user_param->iters,int,MIN_ITER,MAX_ITER,"Iteration num"); break;
 			case 't': CHECK_VALUE(user_param->tx_depth,int,MIN_TX,MAX_TX,"Tx depth"); break;
-			case 'T': CHECK_VALUE(user_param->tos,int,MIN_TOS,MAX_TOS,"TOS"); break;
+			case 'T': CHECK_VALUE(user_param->tos,int,MIN_TOS,MAX_TOS,"TOS");
+			  fprintf(stderr, "will use rdma_cm tos=%d\n", user_param->tos);
+			  break;
 			case 'L': CHECK_VALUE(user_param->hop_limit,int,MIN_HOP_LIMIT,MAX_HOP_LIMIT,"Hop Limit"); break;
 			case 'u': user_param->qp_timeout = (uint8_t)strtol(optarg, NULL, 0); break;
 			case 'S': user_param->sl = (uint8_t)strtol(optarg, NULL, 0);
@@ -2337,6 +2344,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 					  fprintf(stderr," Only %d Service levels\n",MAX_SL);
 					  return 1;
 				  }
+				  fprintf(stderr, "will use service level=%d\n", user_param->sl);
 				  if (user_param->connection_type == RawEth)
 					  user_param->raw_qos = 1;
 				  break;
@@ -3281,7 +3289,8 @@ void ctx_print_test_info(struct perftest_parameters *user_param)
 #ifdef HAVE_ROCM
 	printf(" Use ROCm memory : %s\n", user_param->use_rocm ? "ON" : "OFF");
 #endif
-
+	printf(" inline_size: %d\n", user_param->inline_size);
+	printf(" inline_recv_size: %d\n", user_param->inline_recv_size);
 	printf(" Data ex. method : %s",exchange_state[temp]);
 
 	if (user_param->work_rdma_cm) {

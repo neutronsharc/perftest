@@ -49,6 +49,7 @@
 #include "perftest_resources.h"
 #include "multicast_resources.h"
 #include "perftest_communication.h"
+#include "log.h"
 
 /******************************************************************************
  *
@@ -185,6 +186,8 @@ int main(int argc, char *argv[])
 	user_param.tst     = LAT;
 	strncpy(user_param.version, VERSION, sizeof(user_param.version));
 	user_param.r_flag  = &report;
+
+	LOG("cpu freq=%.2f MHz", get_cpu_mhz(1));
 
 	/* Configure the parameters values according to user arguments or defalut values. */
 	ret_val = parser(&user_param,argv,argc);
@@ -446,6 +449,10 @@ int main(int argc, char *argv[])
 		if(run_iter_lat_send(&ctx, &user_param))
 			return 17;
 
+		// show the bandwidth print header
+		printf("\n"RESULT_LINE);
+		printf("%s", RESULT_FMT_LAT_DUR);
+		printf("\n");
 		user_param.test_type == ITERATIONS ? print_report_lat(&user_param) : print_report_lat_duration(&user_param);
 	}
 

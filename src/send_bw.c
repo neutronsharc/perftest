@@ -42,6 +42,7 @@
 #include "perftest_resources.h"
 #include "multicast_resources.h"
 #include "perftest_communication.h"
+#include "log.h"
 
 /******************************************************************************
  *
@@ -164,6 +165,9 @@ int main(int argc, char *argv[])
 	struct bw_report_data		my_bw_rep, rem_bw_rep;
 	int                      	ret_parser, i = 0, rc;
 	int                      	size_max_pow = 24;
+
+	LOG("test name=%s", argv[0]);
+  LOG("cpu freq=%.2f MHz", get_cpu_mhz(1));
 
 	/* init default values to user's parameters */
 	memset(&ctx, 0,sizeof(struct pingpong_context));
@@ -382,7 +386,8 @@ int main(int argc, char *argv[])
 			return FAILURE;
 		}
 	}
-
+	LOG("qps=%d, per_qp iters=%ld, output format=%d, test_mode=%d",
+			user_param.num_of_qps, user_param.iters, user_param.output, user_param.test_method);
 	if (user_param.output == FULL_VERBOSITY) {
 		if (user_param.report_per_port) {
 			printf(RESULT_LINE_PER_PORT);
@@ -493,7 +498,11 @@ int main(int argc, char *argv[])
 			return 17;
 		}
 
-		print_report_bw(&user_param,&my_bw_rep);
+    // show the bandwidth print header
+    printf("\n"RESULT_LINE);
+    printf((user_param.report_fmt == MBS ? RESULT_FMT : RESULT_FMT_G));
+    printf("\n");
+    print_report_bw(&user_param,&my_bw_rep);
 
 		if (user_param.duplex && user_param.test_type != DURATION) {
 			xchg_bw_reports(&user_comm, &my_bw_rep,&rem_bw_rep,atof(user_param.rem_version));

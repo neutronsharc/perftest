@@ -1,0 +1,25 @@
+This project is derived from "linux-rdma/perftest", with a custom patch from HCD to print "send_bw" and "send_latency"
+every 1 second during running.
+
+Right now only "ib_send_bw" and "ib_send_lat" are supported.
+
+Usage example of "ib_send_bw": RC send bandwidth, data size=5000 bytes, tx-queue=4, duration = 10 seconds, use RDMA-cm
+to establish conn, measure bi-direction bandwidth.
+
+- server:
+$./ib_send_bw -F -s 5000 -t 4 -D 10 -R -b
+
+-client:
+$./ib_send_bw -F -s 5000 -t 4 -D 10 -R -b <srv ip>
+
+
+Usage example of "ib_send_lat": RC send latency, data size=500 bytes, tx-queue=4, duration = 10 seconds
+
+- server side:
+$./ib_send_lat -F -s 500 -t 4 -D 10
+
+- client:
+$./ib_send_lat -F -t 4 -s 500 -D 10 <srv ip>
+
+
+
